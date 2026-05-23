@@ -1,6 +1,6 @@
 # 🎧 PDF to Audio Converter (Hindi + English)
 
-Convert any PDF into natural-sounding audio using Microsoft Edge TTS — completely free!
+Convert any PDF into natural-sounding audio using Microsoft Edge TTS!
 
 ##  Features
 -  **Hindi** (Swara Female, Madhur Male) — best-in-class quality
@@ -56,4 +56,4 @@ pdf-audio-converter/
 ##  Notes
 - Works best with text-based PDFs (not scanned images)
 - Very large PDFs are auto-split into chunks and merged
-- Edge TTS requires internet connection (free, no API key needed)
+- Edge TTS requires internet connection (no API key needed)
