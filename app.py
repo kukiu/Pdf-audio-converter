@@ -5,802 +5,776 @@ import pdfplumber
 import tempfile
 import os
 import re
-import base64
 from datetime import datetime
 from deep_translator import GoogleTranslator
 
 # ── Page config ───────────────────────────────────────────────────────────────
-st.set_page_config(
-    page_title="PDF → Audio Converter",
-    page_icon="🎧",
-    layout="centered",
-)
+st.set_page_config(page_title="PDF → Audio Converter", page_icon="🎧", layout="centered")
 
-# ── Session state init ────────────────────────────────────────────────────────
-defaults = {
-    "history": [],
-    "extracted_text": "",
-    "pdf_info": {},
-    "preview_ready": False,
-    "last_filename": "",
-    "voice_sample_bytes": None,
-    "voice_sample_label": "",
-    "dark_mode": True,
-    "last_audio_bytes": None,
-    "last_audio_name": "",
+# ── Session state ─────────────────────────────────────────────────────────────
+DEFAULTS = {
+    "history": [], "extracted_text": "", "pdf_info": {}, "preview_ready": False,
+    "last_filename": "", "voice_sample_bytes": None, "voice_sample_label": "",
+    "dark_mode": True, "last_audio_bytes": None, "last_audio_lang": "en",
+    "chapters": [], "selected_chapter": "Full Document",
+    "bilingual_en": [], "bilingual_hi": [],
+    "reading_text": "", "reading_active": False,
 }
-for k, v in defaults.items():
+for k, v in DEFAULTS.items():
     if k not in st.session_state:
         st.session_state[k] = v
 
-# ── Theme variables ───────────────────────────────────────────────────────────
-if st.session_state.dark_mode:
-    T = {
-        "bg": "#0d0d0f", "card": "#141417", "border": "#2a2a30",
-        "text": "#f0ede8", "muted": "#7a7a85", "input_bg": "#0d0d0f",
-        "hist_bg": "#1a1a1f", "fi_bg": "#1a1a1f", "toggle_icon": "☀️",
-        "toggle_label": "Light Mode", "waveform_color": "#f5a623",
-        "drop_bg": "#0d0d0f", "drop_border": "#2a2a30",
-    }
-else:
-    T = {
-        "bg": "#f5f5f7", "card": "#ffffff", "border": "#e0e0e8",
-        "text": "#1a1a2e", "muted": "#6b7280", "input_bg": "#f9f9fb",
-        "hist_bg": "#f0f0f5", "fi_bg": "#f0f0f5", "toggle_icon": "🌙",
-        "toggle_label": "Dark Mode", "waveform_color": "#e05c2a",
-        "drop_bg": "#f9f9fb", "drop_border": "#d0d0da",
-    }
+# ── Theme ─────────────────────────────────────────────────────────────────────
+D = st.session_state.dark_mode
+T = {
+    "bg":         "#0d0d0f"  if D else "#f4f4f6",
+    "card":       "#141417"  if D else "#ffffff",
+    "border":     "#2a2a30"  if D else "#e2e2ea",
+    "text":       "#f0ede8"  if D else "#18181b",
+    "muted":      "#7a7a85"  if D else "#6b7280",
+    "input_bg":   "#0d0d0f"  if D else "#f9f9fb",
+    "hist_bg":    "#1a1a1f"  if D else "#f0f0f5",
+    "fi_bg":      "#1a1a1f"  if D else "#f0f0f5",
+    "icon":       "☀️"       if D else "🌙",
+    "wc":         "#f5a623"  if D else "#e05c2a",
+    "read_hl":    "#f5a62328" if D else "#f5a62320",
+    "read_hl_b":  "#f5a623",
+}
 
 # ── CSS ───────────────────────────────────────────────────────────────────────
 st.markdown(f"""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Sans:wght@300;400;500&display=swap');
+:root{{
+  --bg:{T['bg']};--card:{T['card']};--border:{T['border']};
+  --accent:#f5a623;--accent2:#e05c2a;--text:{T['text']};--muted:{T['muted']};
+  --success:#3ecf8e;--info:#38bdf8;--purple:#c084fc;
+  --input-bg:{T['input_bg']};--hist-bg:{T['hist_bg']};--fi-bg:{T['fi_bg']};
+}}
+html,body,[data-testid="stAppViewContainer"]{{background:var(--bg)!important;color:var(--text)!important;font-family:'DM Sans',sans-serif!important;transition:background .3s,color .3s;}}
+[data-testid="stHeader"]{{background:transparent!important;}}
+[data-testid="stSidebar"]{{display:none!important;}}
+.block-container{{padding-top:1.2rem!important;max-width:750px!important;}}
+h1,h2,h3{{font-family:'Syne',sans-serif!important;}}
 
-:root {{
-    --bg: {T['bg']};
-    --card: {T['card']};
-    --border: {T['border']};
-    --accent: #f5a623;
-    --accent2: #e05c2a;
-    --text: {T['text']};
-    --muted: {T['muted']};
-    --success: #3ecf8e;
-    --info: #38bdf8;
-    --purple: #c084fc;
-    --input-bg: {T['input_bg']};
-    --hist-bg: {T['hist_bg']};
-    --fi-bg: {T['fi_bg']};
-}}
+/* Hero */
+.hero{{text-align:center;padding:1.2rem 1rem .8rem;}}
+.hero-badge{{display:inline-block;background:linear-gradient(135deg,#f5a62322,#e05c2a22);border:1px solid #f5a62355;color:var(--accent);font-family:'Syne',sans-serif;font-size:.68rem;font-weight:700;letter-spacing:.15em;text-transform:uppercase;padding:.28rem .9rem;border-radius:100px;margin-bottom:.8rem;}}
+.hero h1{{font-size:2.3rem!important;font-weight:800!important;background:linear-gradient(135deg,{T['text']} 30%,#f5a623 100%);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;line-height:1.15!important;margin-bottom:.45rem!important;}}
+.hero p{{color:var(--muted);font-size:.9rem;max-width:480px;margin:0 auto;line-height:1.6;}}
+.flow-steps{{display:flex;align-items:center;justify-content:center;gap:.35rem;flex-wrap:wrap;margin:.75rem 0 0;font-size:.74rem;color:var(--muted);}}
+.flow-step{{background:var(--fi-bg);border:1px solid var(--border);border-radius:7px;padding:.18rem .5rem;}}
+.flow-arrow{{color:var(--accent);font-weight:700;}}
 
-html, body, [data-testid="stAppViewContainer"] {{
-    background: var(--bg) !important;
-    color: var(--text) !important;
-    font-family: 'DM Sans', sans-serif !important;
-    transition: background 0.3s, color 0.3s;
-}}
-[data-testid="stHeader"] {{ background: transparent !important; }}
-[data-testid="stSidebar"] {{ display: none !important; }}
-.block-container {{ padding-top: 1.5rem !important; max-width: 740px !important; }}
-h1, h2, h3 {{ font-family: 'Syne', sans-serif !important; }}
+/* Cards */
+.card{{background:var(--card);border:1px solid var(--border);border-radius:15px;padding:1.2rem;margin-bottom:.85rem;transition:background .3s,border-color .3s;}}
+.card-label{{font-family:'Syne',sans-serif;font-size:.65rem;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);margin-bottom:.7rem;}}
 
-/* ── Theme toggle bar ── */
-.topbar {{
-    display: flex; justify-content: flex-end; align-items: center;
-    margin-bottom: 0.5rem; padding: 0 0.2rem;
-}}
-.theme-pill {{
-    display: inline-flex; align-items: center; gap: 0.4rem;
-    background: var(--card); border: 1px solid var(--border);
-    border-radius: 100px; padding: 0.3rem 0.9rem;
-    font-size: 0.75rem; font-weight: 600; color: var(--muted);
-    cursor: pointer;
-}}
+/* File info grid */
+.fi-grid{{display:grid;grid-template-columns:repeat(4,1fr);gap:.55rem;margin-top:.35rem;}}
+.fi-box{{background:var(--fi-bg);border:1px solid var(--border);border-radius:9px;padding:.55rem .4rem;text-align:center;}}
+.fi-val{{font-size:1rem;font-weight:700;color:var(--accent);font-family:'Syne',sans-serif;}}
+.fi-lbl{{font-size:.64rem;color:var(--muted);margin-top:.1rem;}}
 
-/* ── Hero ── */
-.hero {{ text-align: center; padding: 1.5rem 1rem 1rem; }}
-.hero-badge {{
-    display: inline-block;
-    background: linear-gradient(135deg, #f5a62322, #e05c2a22);
-    border: 1px solid #f5a62355; color: var(--accent);
-    font-family: 'Syne', sans-serif; font-size: 0.7rem; font-weight: 700;
-    letter-spacing: 0.15em; text-transform: uppercase;
-    padding: 0.3rem 1rem; border-radius: 100px; margin-bottom: 0.9rem;
-}}
-.hero h1 {{
-    font-size: 2.4rem !important; font-weight: 800 !important;
-    background: linear-gradient(135deg, {T['text']} 30%, #f5a623 100%);
-    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
-    background-clip: text; line-height: 1.15 !important; margin-bottom: 0.5rem !important;
-}}
-.hero p {{ color: var(--muted); font-size: 0.92rem; max-width: 460px; margin: 0 auto; line-height: 1.6; }}
-.flow-steps {{
-    display: flex; align-items: center; justify-content: center;
-    gap: 0.4rem; flex-wrap: wrap; margin: 0.8rem 0 0;
-    font-size: 0.76rem; color: var(--muted);
-}}
-.flow-step {{ background: var(--fi-bg); border: 1px solid var(--border); border-radius: 8px; padding: 0.2rem 0.55rem; }}
-.flow-arrow {{ color: var(--accent); font-weight: bold; }}
+/* Chapter chips */
+.chapter-chips{{display:flex;flex-wrap:wrap;gap:.4rem;margin:.5rem 0;}}
+.chapter-chip{{background:var(--fi-bg);border:1px solid var(--border);border-radius:7px;padding:.3rem .65rem;font-size:.76rem;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:220px;}}
+.chapter-chip.active{{background:linear-gradient(135deg,#f5a62318,#e05c2a18);border-color:var(--accent);color:var(--accent);font-weight:600;}}
 
-/* ── Cards ── */
-.card {{
-    background: var(--card); border: 1px solid var(--border);
-    border-radius: 16px; padding: 1.3rem; margin-bottom: 0.9rem;
-    transition: background 0.3s, border-color 0.3s;
-}}
-.card-label {{
-    font-family: 'Syne', sans-serif; font-size: 0.67rem; font-weight: 700;
-    letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); margin-bottom: 0.75rem;
-}}
+/* Badges */
+.translate-badge{{display:inline-flex;align-items:center;gap:.35rem;background:linear-gradient(135deg,#7c3aed20,#a855f720);border:1px solid #7c3aed44;color:var(--purple);font-size:.72rem;font-weight:600;padding:.25rem .75rem;border-radius:100px;margin:.3rem 0;}}
+.info-badge{{display:inline-flex;align-items:center;gap:.35rem;background:#38bdf810;border:1px solid #38bdf830;color:var(--info);font-size:.7rem;font-weight:500;padding:.22rem .7rem;border-radius:100px;margin:.22rem 0;}}
+.success-badge{{display:inline-flex;align-items:center;gap:.35rem;background:#3ecf8e10;border:1px solid #3ecf8e30;color:var(--success);font-size:.7rem;font-weight:500;padding:.22rem .7rem;border-radius:100px;margin:.22rem 0;}}
 
-/* ── Drag & Drop zone ── */
-.drop-zone {{
-    border: 2px dashed var(--border); border-radius: 14px;
-    background: {T['drop_bg']}; padding: 2.2rem 1rem; text-align: center;
-    transition: border-color 0.2s, background 0.2s; cursor: pointer;
-    position: relative;
-}}
-.drop-zone:hover {{ border-color: var(--accent); background: #f5a62308; }}
-.drop-icon {{ font-size: 2rem; margin-bottom: 0.5rem; }}
-.drop-title {{ font-family: 'Syne', sans-serif; font-size: 0.95rem; font-weight: 700; color: var(--text); }}
-.drop-sub {{ font-size: 0.78rem; color: var(--muted); margin-top: 0.25rem; }}
-.drop-badge {{
-    display: inline-block; background: var(--fi-bg); border: 1px solid var(--border);
-    border-radius: 6px; font-size: 0.7rem; padding: 0.15rem 0.5rem;
-    color: var(--muted); margin-top: 0.5rem;
-}}
+/* Waveform */
+.waveform-wrap{{background:var(--card);border:1px solid var(--border);border-radius:13px;padding:1rem .9rem .7rem;margin:.75rem 0;}}
+.waveform-label{{font-family:'Syne',sans-serif;font-size:.64rem;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);margin-bottom:.55rem;}}
+#waveform-canvas{{width:100%;height:72px;border-radius:7px;background:{T['input_bg']};display:block;cursor:pointer;}}
+.wf-controls{{display:flex;align-items:center;justify-content:space-between;margin-top:.5rem;font-size:.74rem;color:var(--muted);}}
+.wf-time{{font-family:'Syne',sans-serif;font-size:.8rem;color:var(--accent);font-weight:700;}}
 
-/* ── File info grid ── */
-.file-info-grid {{
-    display: grid; grid-template-columns: repeat(4, 1fr); gap: 0.6rem; margin-top: 0.4rem;
-}}
-.fi-box {{
-    background: var(--fi-bg); border: 1px solid var(--border);
-    border-radius: 10px; padding: 0.6rem 0.5rem; text-align: center;
-}}
-.fi-box .fi-val {{ font-size: 1.05rem; font-weight: 700; color: var(--accent); font-family: 'Syne', sans-serif; }}
-.fi-box .fi-lbl {{ font-size: 0.67rem; color: var(--muted); margin-top: 0.12rem; }}
+/* Bilingual */
+.bi-pair{{display:grid;grid-template-columns:1fr 1fr;gap:.7rem;margin-bottom:.55rem;}}
+.bi-col{{background:var(--fi-bg);border:1px solid var(--border);border-radius:10px;padding:.75rem .85rem;}}
+.bi-tag{{font-size:.58rem;font-weight:700;letter-spacing:.1em;text-transform:uppercase;margin-bottom:.3rem;}}
+.bi-text{{font-size:.82rem;line-height:1.75;color:var(--text);}}
 
-/* ── Waveform container ── */
-.waveform-wrap {{
-    background: var(--card); border: 1px solid var(--border);
-    border-radius: 14px; padding: 1.2rem 1rem 0.8rem;
-    margin: 0.8rem 0;
-}}
-.waveform-label {{
-    font-family: 'Syne', sans-serif; font-size: 0.67rem; font-weight: 700;
-    letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); margin-bottom: 0.6rem;
-}}
-#waveform-canvas {{
-    width: 100%; height: 80px; border-radius: 8px;
-    background: {T['input_bg']}; display: block;
-}}
-.waveform-controls {{
-    display: flex; align-items: center; justify-content: space-between;
-    margin-top: 0.6rem; font-size: 0.78rem; color: var(--muted);
-}}
-.wf-time {{ font-family: 'Syne', sans-serif; font-size: 0.82rem; color: var(--accent); font-weight: 700; }}
+/* Reading mode */
+.reading-container{{background:var(--fi-bg);border:1px solid var(--border);border-radius:13px;padding:1.2rem;margin-top:.7rem;max-height:450px;overflow-y:auto;scroll-behavior:smooth;}}
+.r-sent{{padding:.38rem .55rem;border-radius:7px;margin:.18rem 0;font-size:.88rem;line-height:1.82;color:var(--text);cursor:pointer;border-left:3px solid transparent;transition:all .18s;}}
+.r-sent:hover{{background:{T['fi_bg']};}}
+.r-sent.active{{background:{T['read_hl']};border-left-color:{T['read_hl_b']};color:var(--accent);font-weight:500;}}
 
-/* ── Badges ── */
-.translate-badge {{
-    display: inline-flex; align-items: center; gap: 0.4rem;
-    background: linear-gradient(135deg, #7c3aed22, #a855f722);
-    border: 1px solid #7c3aed55; color: var(--purple);
-    font-size: 0.74rem; font-weight: 600;
-    padding: 0.28rem 0.8rem; border-radius: 100px; margin: 0.35rem 0;
-}}
-.info-badge {{
-    display: inline-flex; align-items: center; gap: 0.4rem;
-    background: #38bdf811; border: 1px solid #38bdf833; color: var(--info);
-    font-size: 0.72rem; font-weight: 500;
-    padding: 0.25rem 0.75rem; border-radius: 100px; margin: 0.25rem 0;
-}}
+/* Inputs */
+[data-testid="stTextArea"] textarea{{background:var(--input-bg)!important;color:var(--text)!important;border:1px solid var(--border)!important;border-radius:9px!important;font-family:'DM Sans',sans-serif!important;font-size:.86rem!important;line-height:1.7!important;}}
+[data-testid="stTextArea"] textarea:focus{{border-color:var(--accent)!important;box-shadow:0 0 0 2px #f5a62320!important;}}
+div[data-baseweb="select"]>div{{background:var(--input-bg)!important;border-color:var(--border)!important;color:var(--text)!important;border-radius:9px!important;}}
+[data-testid="stSelectbox"] label,[data-testid="stNumberInput"] label{{color:var(--muted)!important;font-size:.81rem!important;}}
+[data-testid="stNumberInput"] input{{background:var(--input-bg)!important;color:var(--text)!important;border-color:var(--border)!important;border-radius:7px!important;}}
+[data-testid="stFileUploader"]{{border:2px dashed var(--border)!important;border-radius:11px!important;background:var(--input-bg)!important;}}
+[data-testid="stFileUploader"]:hover{{border-color:var(--accent)!important;}}
+[data-testid="stFileUploaderDropzone"]{{background:transparent!important;}}
 
-/* ── Textarea ── */
-[data-testid="stTextArea"] textarea {{
-    background: var(--input-bg) !important; color: var(--text) !important;
-    border: 1px solid var(--border) !important; border-radius: 10px !important;
-    font-family: 'DM Sans', sans-serif !important; font-size: 0.87rem !important; line-height: 1.7 !important;
-}}
-[data-testid="stTextArea"] textarea:focus {{ border-color: var(--accent) !important; box-shadow: 0 0 0 2px #f5a62322 !important; }}
+/* Tabs */
+[data-testid="stTabs"] [data-baseweb="tab-list"]{{background:var(--card)!important;border-radius:11px!important;padding:.28rem!important;gap:.18rem!important;border:1px solid var(--border)!important;}}
+[data-testid="stTabs"] [data-baseweb="tab"]{{background:transparent!important;color:var(--muted)!important;border-radius:7px!important;font-family:'Syne',sans-serif!important;font-size:.78rem!important;font-weight:600!important;padding:.35rem .9rem!important;border:none!important;}}
+[data-testid="stTabs"] [aria-selected="true"]{{background:linear-gradient(135deg,var(--accent),var(--accent2))!important;color:#0d0d0f!important;}}
 
-/* ── Tabs ── */
-[data-testid="stTabs"] [data-baseweb="tab-list"] {{
-    background: var(--card) !important; border-radius: 12px !important;
-    padding: 0.3rem !important; gap: 0.2rem !important; border: 1px solid var(--border) !important;
-}}
-[data-testid="stTabs"] [data-baseweb="tab"] {{
-    background: transparent !important; color: var(--muted) !important;
-    border-radius: 8px !important; font-family: 'Syne', sans-serif !important;
-    font-size: 0.8rem !important; font-weight: 600 !important;
-    padding: 0.38rem 1rem !important; border: none !important;
-}}
-[data-testid="stTabs"] [aria-selected="true"] {{
-    background: linear-gradient(135deg, var(--accent), var(--accent2)) !important; color: #0d0d0f !important;
-}}
+/* Buttons */
+div[data-testid="stButton"]>button{{background:linear-gradient(135deg,var(--accent),var(--accent2))!important;color:#0d0d0f!important;font-family:'Syne',sans-serif!important;font-weight:700!important;font-size:.91rem!important;border:none!important;border-radius:11px!important;height:2.8rem!important;box-shadow:0 4px 16px #f5a62328!important;transition:opacity .2s,transform .1s!important;width:100%;}}
+div[data-testid="stButton"]>button:hover{{opacity:.86!important;transform:translateY(-1px)!important;}}
+[data-testid="stProgress"]>div>div{{background:linear-gradient(90deg,var(--accent),var(--accent2))!important;border-radius:100px!important;}}
+[data-testid="stProgress"]{{background:var(--border)!important;border-radius:100px!important;}}
 
-/* ── History ── */
-.hist-card {{
-    background: var(--hist-bg); border: 1px solid var(--border);
-    border-radius: 12px; padding: 0.9rem 1.1rem; margin-bottom: 0.7rem;
-    display: flex; justify-content: space-between; align-items: center;
-}}
-.hist-info .hist-name {{ font-family: 'Syne', sans-serif; font-size: 0.88rem; font-weight: 700; color: var(--text); }}
-.hist-info .hist-meta {{ font-size: 0.73rem; color: var(--muted); margin-top: 0.12rem; }}
-.hist-badge {{ font-size: 0.68rem; font-weight: 600; padding: 0.18rem 0.55rem; border-radius: 100px; border: 1px solid; }}
-.hist-badge.en {{ color: var(--info); border-color: #38bdf844; background: #38bdf811; }}
-.hist-badge.hi {{ color: var(--purple); border-color: #c084fc44; background: #c084fc11; }}
+/* Result */
+.result-card{{background:linear-gradient(135deg,#3ecf8e10,#3ecf8e04);border:1px solid #3ecf8e40;border-radius:15px;padding:1.2rem;margin-top:.75rem;text-align:center;}}
+.result-card h3{{color:var(--success)!important;font-size:1rem!important;margin-bottom:.22rem!important;}}
+.result-card p{{color:var(--muted);font-size:.83rem;margin-bottom:.85rem;}}
+.stats-row{{display:flex;gap:.5rem;margin-top:.6rem;flex-wrap:wrap;justify-content:center;}}
+.stat-pill{{background:var(--fi-bg);border:1px solid var(--border);border-radius:7px;padding:.28rem .65rem;font-size:.72rem;color:var(--muted);}}
+.stat-pill span{{color:var(--text);font-weight:500;}}
+div[data-testid="stDownloadButton"]>button{{background:transparent!important;color:var(--success)!important;border:1.5px solid var(--success)!important;font-family:'Syne',sans-serif!important;font-weight:600!important;border-radius:11px!important;height:2.8rem!important;width:100%;}}
+div[data-testid="stDownloadButton"]>button:hover{{background:#3ecf8e10!important;}}
+audio{{width:100%;border-radius:9px;margin-top:.3rem;}}
+[data-testid="stAudio"]{{background:var(--input-bg);border-radius:11px;padding:.45rem;border:1px solid var(--border);}}
 
-/* ── Inputs ── */
-div[data-baseweb="select"] > div {{
-    background: var(--input-bg) !important; border-color: var(--border) !important;
-    color: var(--text) !important; border-radius: 10px !important;
-}}
-[data-testid="stSelectbox"] label {{ color: var(--muted) !important; font-size: 0.82rem !important; }}
-[data-testid="stNumberInput"] label {{ color: var(--muted) !important; font-size: 0.82rem !important; }}
-[data-testid="stNumberInput"] input {{
-    background: var(--input-bg) !important; color: var(--text) !important;
-    border-color: var(--border) !important; border-radius: 8px !important;
-}}
+/* History */
+.hist-card{{background:var(--hist-bg);border:1px solid var(--border);border-radius:11px;padding:.85rem 1rem;margin-bottom:.6rem;display:flex;justify-content:space-between;align-items:center;}}
+.hist-name{{font-family:'Syne',sans-serif;font-size:.86rem;font-weight:700;color:var(--text);}}
+.hist-meta{{font-size:.71rem;color:var(--muted);margin-top:.1rem;}}
+.hist-badge{{font-size:.66rem;font-weight:600;padding:.16rem .5rem;border-radius:100px;border:1px solid;white-space:nowrap;}}
+.hist-badge.en{{color:var(--info);border-color:#38bdf840;background:#38bdf810;}}
+.hist-badge.hi{{color:var(--purple);border-color:#c084fc40;background:#c084fc10;}}
 
-/* ── File uploader ── */
-[data-testid="stFileUploader"] {{
-    border: 2px dashed {T['drop_border']} !important; border-radius: 12px !important;
-    background: {T['drop_bg']} !important;
-}}
-[data-testid="stFileUploader"]:hover {{ border-color: var(--accent) !important; }}
-[data-testid="stFileUploaderDropzone"] {{ background: transparent !important; }}
-[data-testid="stFileUploader"] section {{ padding: 1.5rem !important; }}
-[data-testid="stFileUploader"] section > div {{ gap: 0.5rem !important; }}
-
-/* ── Buttons ── */
-div[data-testid="stButton"] > button {{
-    background: linear-gradient(135deg, var(--accent), var(--accent2)) !important;
-    color: #0d0d0f !important; font-family: 'Syne', sans-serif !important;
-    font-weight: 700 !important; font-size: 0.93rem !important;
-    border: none !important; border-radius: 12px !important; height: 2.9rem !important;
-    box-shadow: 0 4px 18px #f5a62330 !important; transition: opacity 0.2s, transform 0.1s !important; width: 100%;
-}}
-div[data-testid="stButton"] > button:hover {{ opacity: 0.87 !important; transform: translateY(-1px) !important; }}
-
-/* ── Progress ── */
-[data-testid="stProgress"] > div > div {{
-    background: linear-gradient(90deg, var(--accent), var(--accent2)) !important; border-radius: 100px !important;
-}}
-[data-testid="stProgress"] {{ background: var(--border) !important; border-radius: 100px !important; }}
-
-/* ── Result card ── */
-.result-card {{
-    background: linear-gradient(135deg, #3ecf8e12, #3ecf8e05);
-    border: 1px solid #3ecf8e44; border-radius: 16px; padding: 1.3rem; margin-top: 0.8rem; text-align: center;
-}}
-.result-card h3 {{ color: var(--success) !important; font-size: 1.02rem !important; margin-bottom: 0.25rem !important; }}
-.result-card p {{ color: var(--muted); font-size: 0.84rem; margin-bottom: 0.9rem; }}
-.stats-row {{ display: flex; gap: 0.55rem; margin-top: 0.65rem; flex-wrap: wrap; justify-content: center; }}
-.stat-pill {{
-    background: var(--fi-bg); border: 1px solid var(--border); border-radius: 8px;
-    padding: 0.3rem 0.7rem; font-size: 0.74rem; color: var(--muted);
-}}
-.stat-pill span {{ color: var(--text); font-weight: 500; }}
-
-/* ── Download button ── */
-div[data-testid="stDownloadButton"] > button {{
-    background: transparent !important; color: var(--success) !important;
-    border: 1.5px solid var(--success) !important; font-family: 'Syne', sans-serif !important;
-    font-weight: 600 !important; border-radius: 12px !important; height: 2.9rem !important; width: 100%;
-}}
-div[data-testid="stDownloadButton"] > button:hover {{ background: #3ecf8e12 !important; }}
-
-/* ── Audio ── */
-audio {{ width: 100%; border-radius: 10px; margin-top: 0.3rem; }}
-[data-testid="stAudio"] {{
-    background: var(--input-bg); border-radius: 12px; padding: 0.5rem; border: 1px solid var(--border);
-}}
-
-/* ── Misc ── */
-.status-text {{ font-size: 0.82rem; color: var(--muted); text-align: center; margin-top: 0.35rem; font-style: italic; }}
-.divider {{ height: 1px; background: var(--border); margin: 1rem 0; }}
-.footer {{ text-align: center; color: var(--muted); font-size: 0.73rem; padding: 1.8rem 0 1rem; }}
-.empty-history {{ text-align: center; color: var(--muted); padding: 2.5rem 1rem; font-size: 0.86rem; }}
+/* Misc */
+.status-text{{font-size:.8rem;color:var(--muted);text-align:center;margin-top:.3rem;font-style:italic;}}
+.divider{{height:1px;background:var(--border);margin:.9rem 0;}}
+.footer{{text-align:center;color:var(--muted);font-size:.71rem;padding:1.6rem 0 .8rem;}}
+.empty-state{{text-align:center;color:var(--muted);padding:2.2rem 1rem;font-size:.84rem;line-height:1.8;}}
 </style>
 """, unsafe_allow_html=True)
 
-# ── Waveform JS ───────────────────────────────────────────────────────────────
-WAVEFORM_JS = """
+# ── JavaScript ────────────────────────────────────────────────────────────────
+WAVEFORM_JS = f"""
 <script>
-(function() {
-    // Wait for audio element to exist
-    function initWaveform() {
-        const audioEls = document.querySelectorAll('audio');
-        const canvas = document.getElementById('waveform-canvas');
-        const timeEl = document.getElementById('wf-current');
-        const durEl = document.getElementById('wf-duration');
-        const progressEl = document.getElementById('wf-progress-bar');
+(function(){{
+  function init(){{
+    const audios = document.querySelectorAll('audio');
+    const canvas = document.getElementById('waveform-canvas');
+    const tEl = document.getElementById('wf-cur');
+    const dEl = document.getElementById('wf-dur');
+    if(!canvas||!audios.length){{setTimeout(init,500);return;}}
+    const audio = audios[audios.length-1];
+    const ctx = canvas.getContext('2d');
+    const W=canvas.offsetWidth||680, H=72;
+    canvas.width=W; canvas.height=H;
+    const N=90, col='{T['wc']}';
+    const bars=Array.from({{length:N}},(_,i)=>{{const s=Math.sin(i*127.1+311.7)*43758.5453;return .15+Math.abs(s-Math.floor(s))*.75;}});
+    const fmt=s=>Math.floor(s/60)+':'+String(Math.floor(s%60)).padStart(2,'0');
+    const draw=p=>{{
+      ctx.clearRect(0,0,W,H);
+      const bw=(W-2*(N-1))/N;
+      bars.forEach((b,i)=>{{
+        const x=i*(bw+2),h=b*H*.85,y=(H-h)/2;
+        ctx.fillStyle=i/N<=p?col:col+'44';
+        ctx.beginPath();ctx.roundRect(x,y,bw,h,2);ctx.fill();
+      }});
+    }};
+    draw(0);
+    audio.addEventListener('timeupdate',()=>{{
+      const p=audio.duration?audio.currentTime/audio.duration:0;
+      draw(p);
+      if(tEl)tEl.textContent=fmt(audio.currentTime);
+    }});
+    audio.addEventListener('loadedmetadata',()=>{{if(dEl)dEl.textContent=fmt(audio.duration);}});
+    canvas.addEventListener('click',e=>{{
+      const r=canvas.getBoundingClientRect();
+      if(audio.duration)audio.currentTime=(e.clientX-r.left)/r.width*audio.duration;
+    }});
+  }}
+  setTimeout(init,900);
+}})();
+</script>
+"""
 
-        if (!canvas || audioEls.length === 0) {
-            setTimeout(initWaveform, 400);
-            return;
-        }
-
-        // Use the last audio element (main result)
-        const audio = audioEls[audioEls.length - 1];
-        const ctx = canvas.getContext('2d');
-        const W = canvas.offsetWidth || 600;
-        const H = 80;
-        canvas.width = W;
-        canvas.height = H;
-
-        const BAR_COUNT = 80;
-        const accent = '%s';
-
-        // Generate pseudo-random static waveform bars
-        const bars = [];
-        for (let i = 0; i < BAR_COUNT; i++) {
-            const seed = Math.sin(i * 127.1 + 311.7) * 43758.5453;
-            bars.push(0.15 + Math.abs(seed - Math.floor(seed)) * 0.75);
-        }
-
-        function fmt(s) {
-            const m = Math.floor(s / 60);
-            const sec = Math.floor(s %% 60);
-            return m + ':' + String(sec).padStart(2, '0');
-        }
-
-        function drawWave(progress) {
-            ctx.clearRect(0, 0, W, H);
-            const gap = 2;
-            const bw = (W - gap * (BAR_COUNT - 1)) / BAR_COUNT;
-            for (let i = 0; i < BAR_COUNT; i++) {
-                const x = i * (bw + gap);
-                const h = bars[i] * H * 0.85;
-                const y = (H - h) / 2;
-                const done = i / BAR_COUNT <= progress;
-                ctx.fillStyle = done ? accent : (accent + '44');
-                ctx.beginPath();
-                ctx.roundRect(x, y, bw, h, 2);
-                ctx.fill();
-            }
-        }
-
-        drawWave(0);
-
-        audio.addEventListener('timeupdate', function() {
-            const p = audio.duration ? audio.currentTime / audio.duration : 0;
-            drawWave(p);
-            if (timeEl) timeEl.textContent = fmt(audio.currentTime);
-            if (progressEl) progressEl.style.width = (p * 100) + '%%';
-        });
-
-        audio.addEventListener('loadedmetadata', function() {
-            if (durEl) durEl.textContent = fmt(audio.duration);
-        });
-
-        canvas.addEventListener('click', function(e) {
-            const rect = canvas.getBoundingClientRect();
-            const x = e.clientX - rect.left;
-            const p = x / rect.width;
-            if (audio.duration) audio.currentTime = p * audio.duration;
-        });
-    }
-    setTimeout(initWaveform, 800);
+READING_JS = """
+<script>
+(function(){
+  function init(){
+    const audios=document.querySelectorAll('audio');
+    const sents=document.querySelectorAll('.r-sent');
+    if(!audios.length||!sents.length){setTimeout(init,600);return;}
+    const audio=audios[audios.length-1];
+    const total=sents.length;
+    audio.addEventListener('timeupdate',function(){
+      if(!audio.duration)return;
+      const idx=Math.min(Math.floor((audio.currentTime/audio.duration)*total),total-1);
+      sents.forEach((s,i)=>{
+        s.classList.toggle('active',i===idx);
+        if(i===idx)s.scrollIntoView({behavior:'smooth',block:'nearest'});
+      });
+    });
+    sents.forEach((s,i)=>{
+      s.addEventListener('click',()=>{
+        if(audio.duration){audio.currentTime=(i/total)*audio.duration;audio.play();}
+      });
+    });
+  }
+  setTimeout(init,1100);
 })();
 </script>
-""" % T['waveform_color']
-
+"""
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 VOICES = {
     "English": {
         "Jenny (Female, US) 🇺🇸": "en-US-JennyNeural",
-        "Guy (Male, US) 🇺🇸": "en-US-GuyNeural",
+        "Guy (Male, US) 🇺🇸":    "en-US-GuyNeural",
         "Sonia (Female, UK) 🇬🇧": "en-GB-SoniaNeural",
-        "Ryan (Male, UK) 🇬🇧": "en-GB-RyanNeural",
+        "Ryan (Male, UK) 🇬🇧":   "en-GB-RyanNeural",
     },
     "Hindi 🇮🇳 (Auto-Translate)": {
         "Swara (Female) 🇮🇳": "hi-IN-SwaraNeural",
-        "Madhur (Male) 🇮🇳": "hi-IN-MadhurNeural",
-    }
+        "Madhur (Male) 🇮🇳":  "hi-IN-MadhurNeural",
+    },
 }
-
-SPEED_OPTIONS = {
-    "0.75× Slow": "-25%",
-    "1× Normal": "+0%",
-    "1.25× Fast": "+25%",
-    "1.5× Faster": "+50%",
+SPEEDS = {"0.75× Slow":"-25%","1× Normal":"+0%","1.25× Fast":"+25%","1.5× Faster":"+50%"}
+SAMPLES = {
+    "English": "Hello! This is how your audio will sound. Your PDF will be read in this voice.",
+    "Hindi 🇮🇳 (Auto-Translate)": "नमस्ते! यह आपकी ऑडियो का नमूना है। आपकी पीडीएफ इसी आवाज़ में पढ़ी जाएगी।",
 }
-
-VOICE_SAMPLE_TEXT = {
-    "English": "Hello! This is a preview of how your audio will sound. I will read your PDF in this voice.",
-    "Hindi 🇮🇳 (Auto-Translate)": "नमस्ते! यह आपकी ऑडियो का एक नमूना है। मैं आपकी पीडीएफ इसी आवाज़ में पढूंगा।"
-}
-
-MAX_HISTORY = 5
+CHAPTER_RE = [
+    r'^(chapter|ch\.?|part|section|unit)\s+(\d+|[ivxlcdm]+)',
+    r'^\d+\.\s+[A-Z][a-z]{2,}',
+    r'^[A-Z][A-Z\s]{4,28}$',
+]
+MAX_HIST = 5
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
-def extract_text_from_pdf(uploaded_file, page_start=None, page_end=None):
-    uploaded_file.seek(0)
-    with pdfplumber.open(uploaded_file) as pdf:
-        total_pages = len(pdf.pages)
-        start = (page_start - 1) if page_start else 0
-        end = min(page_end if page_end else total_pages, total_pages)
-        pages_text = [p.extract_text().strip() for p in pdf.pages[start:end] if p.extract_text()]
-    return "\n\n".join(pages_text), total_pages
+def extract_pdf(f, ps=None, pe=None):
+    f.seek(0)
+    with pdfplumber.open(f) as pdf:
+        n = len(pdf.pages)
+        s = (ps-1) if ps else 0
+        e = min(pe if pe else n, n)
+        pages = [p.extract_text().strip() for p in pdf.pages[s:e] if p.extract_text()]
+    return "\n\n".join(pages), n
 
 
-def get_pdf_info(uploaded_file):
-    uploaded_file.seek(0, 2)
-    size_bytes = uploaded_file.tell()
-    uploaded_file.seek(0)
-    size_mb = round(size_bytes / (1024 * 1024), 2)
-    with pdfplumber.open(uploaded_file) as pdf:
-        total_pages = len(pdf.pages)
-        sample = "".join(p.extract_text() or "" for p in pdf.pages[:3])
-    words = len(sample.split())
-    avg = words / min(3, total_pages) if total_pages else 150
-    est_words = int(avg * total_pages)
-    return {"pages": total_pages, "size_mb": size_mb, "est_words": est_words, "est_minutes": int(round(est_words / 130))}
+def pdf_info(f):
+    f.seek(0,2); size=f.tell(); f.seek(0)
+    with pdfplumber.open(f) as pdf:
+        n=len(pdf.pages)
+        sample="".join(p.extract_text() or "" for p in pdf.pages[:3])
+    w=len(sample.split()); avg=w/min(3,n) if n else 150; est=int(avg*n)
+    return {"pages":n,"size_mb":round(size/1024/1024,2),"est_words":est,"est_min":int(round(est/130))}
 
 
-def clean_text(text: str) -> str:
-    text = re.sub(r'\s+', ' ', text)
-    text = re.sub(r'[^\w\s.,!?;:\-\'\"()\u0900-\u097F]', '', text)
+def detect_chapters(text):
+    lines = text.split('\n')
+    chapters, cur_title, cur_lines = [], "Introduction", []
+    for line in lines:
+        s = line.strip()
+        if not s: cur_lines.append(line); continue
+        heading = any(re.match(p, s, re.IGNORECASE) for p in CHAPTER_RE)
+        # Short title-case line heuristic
+        words = s.split()
+        if not heading and 2 <= len(words) <= 7 and s[0].isupper() and not s.endswith('.') and len(s) < 65:
+            heading = True
+        if heading and cur_lines:
+            body = "\n".join(cur_lines).strip()
+            if len(body) > 80:
+                chapters.append({"title": cur_title, "text": body})
+            cur_title, cur_lines = s, []
+        else:
+            cur_lines.append(line)
+    if cur_lines:
+        body = "\n".join(cur_lines).strip()
+        if body: chapters.append({"title": cur_title, "text": body})
+    return chapters
+
+
+def clean(text):
+    text = re.sub(r'\s+',' ',text)
+    text = re.sub(r'[^\w\s.,!?;:\-\'"()\u0900-\u097F]','',text)
     return text.strip()
 
 
-def translate_to_hindi(text, progress_bar, status):
+def translate_bulk(text, pb, status):
     CHUNK = 4500
-    sentences = re.split(r'(?<=[.!?])\s+', text)
+    sents = re.split(r'(?<=[.!?])\s+', text)
     batches, cur = [], ""
-    for s in sentences:
-        if len(cur) + len(s) + 1 <= CHUNK:
-            cur += s + " "
+    for s in sents:
+        if len(cur)+len(s)+1 <= CHUNK: cur += s+" "
         else:
             if cur: batches.append(cur.strip())
-            cur = s + " "
+            cur = s+" "
     if cur: batches.append(cur.strip())
-    translator = GoogleTranslator(source='en', target='hi')
+    tr = GoogleTranslator(source='en', target='hi')
     parts, total = [], len(batches)
-    for i, batch in enumerate(batches):
-        parts.append(translator.translate(batch))
-        progress_bar.progress(35 + int((i + 1) / total * 25))
+    for i,b in enumerate(batches):
+        parts.append(tr.translate(b))
+        pb.progress(35+int((i+1)/total*25))
         status.markdown(f'<p class="status-text">🌐 Translating... ({i+1}/{total} parts)</p>', unsafe_allow_html=True)
     return " ".join(parts)
 
 
-async def gen_chunk(text, voice, rate, path):
+def translate_pairs(text, max_sents=60):
+    sents = [s.strip() for s in re.split(r'(?<=[.!?])\s+', text) if len(s.strip()) > 15][:max_sents]
+    tr = GoogleTranslator(source='en', target='hi')
+    hi = []
+    for s in sents:
+        try: hi.append(tr.translate(s))
+        except: hi.append("—")
+    return sents, hi
+
+
+async def _gen(text, voice, rate, path):
     await edge_tts.Communicate(text, voice, rate=rate).save(path)
 
 
-async def gen_all(chunks, voice, rate, base):
+async def _gen_all(chunks, voice, rate, base):
     paths = [f"{base}_c{i}.mp3" for i in range(len(chunks))]
-    await asyncio.gather(*[gen_chunk(c, voice, rate, p) for c, p in zip(chunks, paths)])
+    await asyncio.gather(*[_gen(c, voice, rate, p) for c,p in zip(chunks,paths)])
     return paths
 
 
-def gen_parallel(chunks, voice, rate, base):
-    return asyncio.run(gen_all(chunks, voice, rate, base))
-
-
-def smart_chunk(text, size=8000):
+def chunk_text(text, size=8000):
     sents = re.split(r'(?<=[।.!?])\s+', text)
     chunks, cur = [], ""
     for s in sents:
-        if len(cur) + len(s) < size: cur += s + " "
+        if len(cur)+len(s)<size: cur+=s+" "
         else:
             if cur: chunks.append(cur.strip())
-            cur = s + " "
+            cur=s+" "
     if cur: chunks.append(cur.strip())
     return chunks or [text]
 
 
-def make_audio(text, voice_id, rate):
-    chunks = smart_chunk(text)
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp:
-        base, path = tmp.name.replace(".mp3", ""), tmp.name
-    if len(chunks) == 1:
-        asyncio.run(gen_chunk(text, voice_id, rate, path))
+def make_audio(text, voice, rate):
+    chunks = chunk_text(text)
+    with tempfile.NamedTemporaryFile(delete=False,suffix=".mp3") as tmp:
+        base,path = tmp.name[:-4],tmp.name
+    if len(chunks)==1:
+        asyncio.run(_gen(text,voice,rate,path))
     else:
-        cps = gen_parallel(chunks, voice_id, rate, base)
-        with open(path, "wb") as out:
+        cps = asyncio.run(_gen_all(chunks,voice,rate,base))
+        with open(path,"wb") as out:
             for cp in cps:
-                if os.path.exists(cp):
-                    out.write(open(cp, "rb").read())
-                    os.unlink(cp)
-    data = open(path, "rb").read()
-    os.unlink(path)
+                if os.path.exists(cp): out.write(open(cp,"rb").read()); os.unlink(cp)
+    data = open(path,"rb").read(); os.unlink(path)
     return data
 
 
-def add_history(name, lang, voice, words, minutes, audio):
-    st.session_state.history.insert(0, {
-        "name": name, "lang": lang, "voice": voice,
-        "words": words, "minutes": minutes, "audio": audio,
-        "time": datetime.now().strftime("%d %b %Y, %I:%M %p"),
+def push_history(name, lang, voice, words, mins, audio):
+    st.session_state.history.insert(0,{
+        "name":name,"lang":lang,"voice":voice,
+        "words":words,"mins":mins,"audio":audio,
+        "time":datetime.now().strftime("%d %b %Y, %I:%M %p"),
     })
-    st.session_state.history = st.session_state.history[:MAX_HISTORY]
+    st.session_state.history = st.session_state.history[:MAX_HIST]
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # UI
 # ══════════════════════════════════════════════════════════════════════════════
 
-# ── Theme toggle (top right) ──────────────────────────────────────────────────
-col_spacer, col_toggle = st.columns([5, 1])
-with col_toggle:
-    if st.button(f"{T['toggle_icon']}", help=T['toggle_label'], use_container_width=True):
-        st.session_state.dark_mode = not st.session_state.dark_mode
-        st.rerun()
+# Theme toggle
+_, tcol = st.columns([6,1])
+with tcol:
+    if st.button(T['icon'], use_container_width=True):
+        st.session_state.dark_mode = not D; st.rerun()
 
-# ── Hero ──────────────────────────────────────────────────────────────────────
+# Hero
 st.markdown(f"""
 <div class="hero">
-    <div class="hero-badge">🎧 Free · No API Key · Premium Features</div>
-    <h1>PDF to Audio<br>Converter</h1>
-    <p>Upload any English PDF — listen in English or auto-translated natural Hindi.</p>
-    <div class="flow-steps">
-        <span class="flow-step">📄 PDF</span><span class="flow-arrow">→</span>
-        <span class="flow-step">✏️ Preview & Edit</span><span class="flow-arrow">→</span>
-        <span class="flow-step">🌐 Translate</span><span class="flow-arrow">→</span>
-        <span class="flow-step">🎵 Waveform Audio</span>
-    </div>
+  <div class="hero-badge">🎧 Free · No API Key · Premium</div>
+  <h1>PDF to Audio<br>Converter</h1>
+  <p>Chapters · Bilingual View · Reading Mode · Waveform · History</p>
+  <div class="flow-steps">
+    <span class="flow-step">📄 PDF</span><span class="flow-arrow">→</span>
+    <span class="flow-step">📑 Chapters</span><span class="flow-arrow">→</span>
+    <span class="flow-step">🌐 Translate</span><span class="flow-arrow">→</span>
+    <span class="flow-step">🎵 Audio</span><span class="flow-arrow">→</span>
+    <span class="flow-step">📖 Read Along</span>
+  </div>
 </div>
 """, unsafe_allow_html=True)
 
-# ── Tabs ──────────────────────────────────────────────────────────────────────
-tab_convert, tab_history = st.tabs(["🎙️  Convert", "🕘  History"])
+# Tabs
+tab_cvt, tab_bi, tab_read, tab_hist = st.tabs([
+    "🎙️  Convert", "🔤  Bilingual", "📖  Read Along", "🕘  History"
+])
 
-with tab_convert:
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 1 — CONVERT
+# ══════════════════════════════════════════════════════════════════════════════
+with tab_cvt:
 
-    # ── Upload ────────────────────────────────────────────────────────────────
+    # Upload
     st.markdown('<div class="card"><div class="card-label">📄 Step 1 — Upload PDF</div>', unsafe_allow_html=True)
-    uploaded_file = st.file_uploader(
-        "Drag & drop your PDF here, or click to browse",
-        type=["pdf"],
-        label_visibility="collapsed",
-        help="Supports text-based PDFs. Max recommended: 50MB."
-    )
-    if uploaded_file is None:
-        st.markdown("""
-        <div style="text-align:center;padding:0.5rem 0 0.2rem;color:var(--muted);font-size:0.78rem;">
-            🗂️ &nbsp;Drag & drop a <strong style="color:var(--text)">PDF file</strong> above, or click to browse &nbsp;·&nbsp; Max 50MB
-        </div>
-        """, unsafe_allow_html=True)
+    uploaded = st.file_uploader("Drop PDF here", type=["pdf"], label_visibility="collapsed")
+    if not uploaded:
+        st.markdown('<p style="text-align:center;font-size:.76rem;color:var(--muted);padding:.3rem 0 .1rem">🗂️ Drag & drop a PDF or click to browse</p>', unsafe_allow_html=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
-    # ── File info ─────────────────────────────────────────────────────────────
-    if uploaded_file is not None:
-        if uploaded_file.name != st.session_state.last_filename:
-            with st.spinner("Reading file..."):
-                info = get_pdf_info(uploaded_file)
-                st.session_state.pdf_info = info
-                st.session_state.last_filename = uploaded_file.name
-                st.session_state.preview_ready = False
-                st.session_state.extracted_text = ""
-                st.session_state.last_audio_bytes = None
+    # File info + Chapter detection (runs once per new file)
+    if uploaded:
+        if uploaded.name != st.session_state.last_filename:
+            with st.spinner("Analysing PDF..."):
+                info = pdf_info(uploaded)
+                raw_full, _ = extract_pdf(uploaded)
+                chapters = detect_chapters(raw_full)
+                st.session_state.update({
+                    "pdf_info": info, "chapters": chapters,
+                    "last_filename": uploaded.name,
+                    "preview_ready": False, "extracted_text": "",
+                    "last_audio_bytes": None, "selected_chapter": "Full Document",
+                    "bilingual_en": [], "bilingual_hi": [],
+                    "reading_text": "", "reading_active": False,
+                })
         else:
             info = st.session_state.pdf_info
 
+        # File info card
         st.markdown(f"""
         <div class="card">
-            <div class="card-label">📊 File Info — {uploaded_file.name}</div>
-            <div class="file-info-grid">
-                <div class="fi-box"><div class="fi-val">{info['pages']}</div><div class="fi-lbl">Pages</div></div>
-                <div class="fi-box"><div class="fi-val">{info['size_mb']} MB</div><div class="fi-lbl">Size</div></div>
-                <div class="fi-box"><div class="fi-val">{info['est_words']:,}</div><div class="fi-lbl">Est. Words</div></div>
-                <div class="fi-box"><div class="fi-val">~{info['est_minutes']} min</div><div class="fi-lbl">Est. Audio</div></div>
-            </div>
+          <div class="card-label">📊 File — {uploaded.name}</div>
+          <div class="fi-grid">
+            <div class="fi-box"><div class="fi-val">{info['pages']}</div><div class="fi-lbl">Pages</div></div>
+            <div class="fi-box"><div class="fi-val">{info['size_mb']} MB</div><div class="fi-lbl">Size</div></div>
+            <div class="fi-box"><div class="fi-val">{info['est_words']:,}</div><div class="fi-lbl">Est. Words</div></div>
+            <div class="fi-box"><div class="fi-val">~{info['est_min']} min</div><div class="fi-lbl">Est. Audio</div></div>
+          </div>
         </div>
         """, unsafe_allow_html=True)
 
-    # ── Settings ──────────────────────────────────────────────────────────────
-    st.markdown('<div class="card"><div class="card-label">⚙️ Step 2 — Settings</div>', unsafe_allow_html=True)
+        # Chapter selector
+        chapters = st.session_state.chapters
+        if chapters:
+            st.markdown('<div class="card"><div class="card-label">📑 Step 2 — Choose Chapter / Section</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="info-badge">🔍 {len(chapters)} sections detected automatically</div>', unsafe_allow_html=True)
+            ch_names = ["📄 Full Document"] + [f"📑 {c['title'][:48]}" for c in chapters]
+            sel = st.selectbox("Section", ch_names, index=0, label_visibility="collapsed")
+            st.session_state.selected_chapter = sel
 
-    col1, col2 = st.columns(2)
-    with col1:
-        language = st.selectbox("Output Language", list(VOICES.keys()), index=0)
-    with col2:
-        voice_label = st.selectbox("Voice", list(VOICES[language].keys()))
+            if sel != "📄 Full Document":
+                idx = ch_names.index(sel) - 1
+                wc = len(chapters[idx]['text'].split())
+                em = round(wc/130,1)
+                st.markdown(f'<div class="success-badge">✅ {chapters[idx]["title"][:40]} · {wc:,} words · ~{em} min</div>', unsafe_allow_html=True)
 
+            # Chapter chips (visual overview)
+            chip_parts = []
+            for c in chapters[:12]:
+                chip_key = "📑 " + c["title"][:48]
+                is_active = chip_key in ch_names and ch_names.index(chip_key) == ch_names.index(sel)
+                css = "chapter-chip active" if is_active else "chapter-chip"
+                chip_parts.append('<span class="' + css + '">' + c["title"][:32] + '</span>')
+            chips_html = "".join(chip_parts)
+            st.markdown(f'<div class="chapter-chips">{chips_html}</div>', unsafe_allow_html=True)
+            st.markdown('</div>', unsafe_allow_html=True)
+
+    # Settings
+    step = "3" if (uploaded and st.session_state.chapters) else "2"
+    st.markdown(f'<div class="card"><div class="card-label">⚙️ Step {step} — Settings</div>', unsafe_allow_html=True)
+
+    c1,c2 = st.columns(2)
+    with c1: language = st.selectbox("Output Language", list(VOICES.keys()), index=0)
+    with c2: voice_label = st.selectbox("Voice", list(VOICES[language].keys()))
     is_hindi = "Hindi" in language
     voice_id = VOICES[language][voice_label]
+    rate     = SPEEDS[st.selectbox("Speed", list(SPEEDS.keys()), index=1)]
 
     if is_hindi:
-        st.markdown('<div class="translate-badge">🌐 English PDF → Auto-Translated → Hindi Audio</div>', unsafe_allow_html=True)
+        st.markdown('<div class="translate-badge">🌐 English PDF → Translated to Hindi → Hindi Audio</div>', unsafe_allow_html=True)
 
-    # Voice preview
-    if st.button(f"🔊 Preview Voice — {voice_label.split('🇺🇸')[0].split('🇬🇧')[0].split('🇮🇳')[0].strip()}"):
+    vname = voice_label.split("🇺🇸")[0].split("🇬🇧")[0].split("🇮🇳")[0].strip()
+    if st.button(f"🔊 Preview Voice — {vname}"):
         with st.spinner("Generating sample..."):
             try:
-                sample = make_audio(VOICE_SAMPLE_TEXT[language], voice_id, "+0%")
-                st.session_state.voice_sample_bytes = sample
+                sb = make_audio(SAMPLES[language], voice_id, "+0%")
+                st.session_state.voice_sample_bytes = sb
                 st.session_state.voice_sample_label = voice_label
-            except Exception as e:
-                st.error(f"Preview failed: {e}")
+            except Exception as e: st.error(f"Preview failed: {e}")
 
     if st.session_state.voice_sample_bytes and st.session_state.voice_sample_label == voice_label:
-        st.markdown('<div class="info-badge">🎧 Voice Sample Preview</div>', unsafe_allow_html=True)
+        st.markdown('<div class="info-badge">🎧 Voice Sample</div>', unsafe_allow_html=True)
         st.audio(st.session_state.voice_sample_bytes, format="audio/mp3")
 
-    col3, col4 = st.columns(2)
-    with col3:
-        speed_label = st.selectbox("Speed", list(SPEED_OPTIONS.keys()), index=1)
-    with col4:
-        convert_mode = st.selectbox("Convert", ["Full PDF", "Page Range"], index=0)
-
-    page_start, page_end = None, None
+    c3,c4 = st.columns(2)
+    with c3: convert_mode = st.selectbox("Convert", ["Full PDF","Page Range"], index=0)
+    page_start = page_end = None
     if convert_mode == "Page Range":
-        c5, c6 = st.columns(2)
-        with c5: page_start = st.number_input("From Page", min_value=1, value=1, step=1)
-        with c6: page_end = st.number_input("To Page", min_value=1, value=10, step=1)
+        with c4: pass  # spacer
+        p1,p2 = st.columns(2)
+        with p1: page_start = st.number_input("From Page", min_value=1, value=1, step=1)
+        with p2: page_end   = st.number_input("To Page",   min_value=1, value=10, step=1)
         st.caption("💡 10–20 pages at a time is fastest")
-
     st.markdown('</div>', unsafe_allow_html=True)
-    rate = SPEED_OPTIONS[speed_label]
 
-    # ── Preview & Edit ────────────────────────────────────────────────────────
-    if uploaded_file is not None:
-        st.markdown('<div class="card"><div class="card-label">✏️ Step 3 — Preview & Edit Text (Optional)</div>', unsafe_allow_html=True)
-        st.markdown('<p style="font-size:0.81rem;color:var(--muted);margin-bottom:0.65rem;">Extract text first, then trim or fix it before generating audio.</p>', unsafe_allow_html=True)
-
-        c_ext, c_clr = st.columns([3, 1])
-        with c_ext:
-            if st.button("Extract & Preview Text", use_container_width=True):
+    # Preview & Edit
+    if uploaded:
+        st.markdown('<div class="card"><div class="card-label">✏️ Preview & Edit Text (Optional)</div>', unsafe_allow_html=True)
+        st.markdown('<p style="font-size:.8rem;color:var(--muted);margin-bottom:.6rem;">Extract → review → trim or fix → then generate. Your edits are used directly.</p>', unsafe_allow_html=True)
+        ce,cc = st.columns([3,1])
+        with ce:
+            if st.button("📖 Extract & Preview", use_container_width=True):
                 with st.spinner("Extracting..."):
                     try:
-                        raw, _ = extract_text_from_pdf(uploaded_file, page_start, page_end)
-                        st.session_state.extracted_text = clean_text(raw)
+                        sel = st.session_state.selected_chapter
+                        chs = st.session_state.chapters
+                        if sel not in ("📄 Full Document","Full Document") and chs:
+                            ch_names2 = ["📄 Full Document"] + [f"📑 {c['title'][:48]}" for c in chs]
+                            idx2 = ch_names2.index(sel)-1 if sel in ch_names2 else None
+                            raw = chs[idx2]['text'] if idx2 is not None else extract_pdf(uploaded,page_start,page_end)[0]
+                        else:
+                            raw,_ = extract_pdf(uploaded, page_start, page_end)
+                        st.session_state.extracted_text = clean(raw)
                         st.session_state.preview_ready = True
-                    except Exception as e:
-                        st.error(f"Extraction failed: {e}")
-        with c_clr:
-            if st.button("Clear", use_container_width=True):
-                st.session_state.extracted_text = ""
-                st.session_state.preview_ready = False
-                st.rerun()
+                    except Exception as e: st.error(f"Failed: {e}")
+        with cc:
+            if st.button("🗑️ Clear", use_container_width=True):
+                st.session_state.extracted_text = ""; st.session_state.preview_ready = False; st.rerun()
 
         if st.session_state.preview_ready and st.session_state.extracted_text:
             wc = len(st.session_state.extracted_text.split())
-            st.markdown(f'<div class="info-badge">📝 {wc:,} words — edit below if needed</div>', unsafe_allow_html=True)
-            edited = st.text_area("", value=st.session_state.extracted_text, height=240, label_visibility="collapsed", key="editor")
+            st.markdown(f'<div class="info-badge">📝 {wc:,} words — edit if needed</div>', unsafe_allow_html=True)
+            edited = st.text_area("Extracted Text", value=st.session_state.extracted_text, height=210, label_visibility="collapsed", key="editor")
             st.session_state.extracted_text = edited
-
         st.markdown('</div>', unsafe_allow_html=True)
 
-    # ── Generate ──────────────────────────────────────────────────────────────
-    st.markdown('<div style="margin-top:0.8rem"></div>', unsafe_allow_html=True)
-    gen_clicked = st.button("🎙️ Generate Audio", use_container_width=True)
-
-    if gen_clicked:
-        if uploaded_file is None:
+    # Generate button
+    st.markdown('<div style="margin-top:.7rem"></div>', unsafe_allow_html=True)
+    if st.button("🎙️ Generate Audio", use_container_width=True):
+        if not uploaded:
             st.warning("⚠️ Upload a PDF first.")
         else:
             st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
-            pb = st.progress(0)
-            status = st.empty()
+            pb = st.progress(0); stat = st.empty()
             try:
+                # Resolve text
                 if st.session_state.preview_ready and st.session_state.extracted_text.strip():
-                    status.markdown('<p class="status-text">✏️ Using your edited text...</p>', unsafe_allow_html=True)
-                    pb.progress(20)
-                    clean = st.session_state.extracted_text.strip()
+                    stat.markdown('<p class="status-text">✏️ Using your edited text...</p>', unsafe_allow_html=True)
+                    pb.progress(20); txt = st.session_state.extracted_text.strip()
                 else:
-                    status.markdown('<p class="status-text">📖 Extracting text...</p>', unsafe_allow_html=True)
-                    pb.progress(10)
-                    raw, _ = extract_text_from_pdf(uploaded_file, page_start, page_end)
-                    if not raw.strip():
-                        st.error("❌ No text found — PDF may be scanned/image-based.")
-                        st.stop()
-                    pb.progress(20)
-                    clean = clean_text(raw)
+                    sel = st.session_state.selected_chapter
+                    chs = st.session_state.chapters
+                    if sel not in ("📄 Full Document","Full Document") and chs:
+                        ch_names3 = ["📄 Full Document"] + [f"📑 {c['title'][:48]}" for c in chs]
+                        idx3 = ch_names3.index(sel)-1 if sel in ch_names3 else None
+                        raw = chs[idx3]['text'] if idx3 is not None else extract_pdf(uploaded,page_start,page_end)[0]
+                    else:
+                        stat.markdown('<p class="status-text">📖 Extracting text...</p>', unsafe_allow_html=True)
+                        pb.progress(10)
+                        raw,_ = extract_pdf(uploaded, page_start, page_end)
+                    if not raw.strip(): st.error("❌ No text found — PDF may be scanned."); st.stop()
+                    pb.progress(20); txt = clean(raw)
 
-                word_count = len(clean.split())
-                est_min = round(word_count / 130, 1)
+                wc  = len(txt.split())
+                em  = round(wc/130, 1)
 
                 if is_hindi:
-                    status.markdown('<p class="status-text">🌐 Translating English → Hindi...</p>', unsafe_allow_html=True)
-                    pb.progress(28)
-                    final_text = translate_to_hindi(clean, pb, status)
+                    stat.markdown('<p class="status-text">🌐 Translating English → Hindi...</p>', unsafe_allow_html=True)
+                    pb.progress(28); final = translate_bulk(txt, pb, stat)
                 else:
-                    final_text = clean
-                    pb.progress(35)
+                    final = txt; pb.progress(35)
 
-                chunks = smart_chunk(final_text)
-                status.markdown(f'<p class="status-text">⚡ Generating audio ({len(chunks)} chunk(s) in parallel)...</p>', unsafe_allow_html=True)
+                nc = len(chunk_text(final))
+                stat.markdown(f'<p class="status-text">⚡ Generating audio ({nc} chunk(s) in parallel)...</p>', unsafe_allow_html=True)
                 pb.progress(65)
+                audio = make_audio(final, voice_id, rate)
+                pb.progress(100); stat.empty()
 
-                audio_bytes = make_audio(final_text, voice_id, rate)
-                pb.progress(100)
-                status.empty()
+                # Store for Reading Mode & Bilingual
+                st.session_state.last_audio_bytes  = audio
+                st.session_state.last_audio_lang   = "hi" if is_hindi else "en"
+                st.session_state.reading_text      = final
+                st.session_state.reading_active    = True
 
-                # Store for waveform
-                st.session_state.last_audio_bytes = audio_bytes
-                pdf_name = uploaded_file.name.replace(".pdf", "")
-                lang_tag = "hindi" if is_hindi else "english"
-                audio_filename = f"{pdf_name}_{lang_tag}_audio.mp3"
-                lang_display = "Hindi 🇮🇳" if is_hindi else "English 🇺🇸"
-                voice_name = voice_label.split(" 🇮🇳")[0].split(" 🇺🇸")[0].split(" 🇬🇧")[0].strip()
-
-                add_history(pdf_name, lang_display, voice_name, word_count, est_min, audio_bytes)
+                pdf_name   = uploaded.name.replace(".pdf","")
+                lang_disp  = "Hindi 🇮🇳" if is_hindi else "English 🇺🇸"
+                audio_fn   = f"{pdf_name}_{'hindi' if is_hindi else 'english'}_audio.mp3"
+                ch_label   = sel.replace("📑 ","")[:30] if sel not in ("📄 Full Document","Full Document") else ""
+                push_history(pdf_name, lang_disp, vname, wc, em, audio)
 
                 st.markdown(f"""
                 <div class="result-card">
-                    <h3>✅ Audio Ready!</h3>
-                    <p>{"Translated from English to Hindi and converted to audio." if is_hindi else "Converted to English audio successfully."}</p>
-                    <div class="stats-row">
-                        <div class="stat-pill">Words <span>{word_count:,}</span></div>
-                        <div class="stat-pill">~Duration <span>{est_min} min</span></div>
-                        <div class="stat-pill">Language <span>{lang_display}</span></div>
-                        <div class="stat-pill">Voice <span>{voice_name}</span></div>
-                    </div>
+                  <h3>✅ Audio Ready!</h3>
+                  <p>{"Translated → Hindi audio" if is_hindi else "English audio"}{f" · {ch_label}" if ch_label else ""}</p>
+                  <div class="stats-row">
+                    <div class="stat-pill">Words <span>{wc:,}</span></div>
+                    <div class="stat-pill">~Duration <span>{em} min</span></div>
+                    <div class="stat-pill">Language <span>{lang_disp}</span></div>
+                    <div class="stat-pill">Voice <span>{vname}</span></div>
+                  </div>
                 </div>
                 """, unsafe_allow_html=True)
 
-                # ── Waveform Player ────────────────────────────────────────────
-                st.markdown(f"""
+                # Waveform
+                st.markdown("""
                 <div class="waveform-wrap">
-                    <div class="waveform-label">🎵 Audio Waveform Player — click to seek</div>
-                    <canvas id="waveform-canvas"></canvas>
-                    <div class="waveform-controls">
-                        <span class="wf-time"><span id="wf-current">0:00</span> / <span id="wf-duration">--:--</span></span>
-                        <span style="font-size:0.72rem;color:var(--muted)">Click waveform to seek · Use player below to play/pause</span>
-                    </div>
+                  <div class="waveform-label">🎵 Waveform — click to seek · switch to 📖 Read Along tab</div>
+                  <canvas id="waveform-canvas"></canvas>
+                  <div class="wf-controls">
+                    <span class="wf-time"><span id="wf-cur">0:00</span> / <span id="wf-dur">--:--</span></span>
+                    <span style="font-size:.7rem;color:var(--muted)">Click waveform bar to jump · Use player ▶ below</span>
+                  </div>
                 </div>
                 """, unsafe_allow_html=True)
 
-                st.audio(audio_bytes, format="audio/mp3")
-
-                # Inject waveform JS
+                st.audio(audio, format="audio/mp3")
                 st.components.v1.html(WAVEFORM_JS, height=0)
-
-                st.download_button(
-                    "⬇️ Download MP3",
-                    data=audio_bytes,
-                    file_name=audio_filename,
-                    mime="audio/mpeg",
-                    use_container_width=True,
-                )
+                st.download_button("⬇️ Download MP3", audio, audio_fn, "audio/mpeg", use_container_width=True)
+                st.markdown('<p style="font-size:.75rem;color:var(--muted);text-align:center;margin-top:.4rem">💡 Switch to the <strong>📖 Read Along</strong> tab to follow sentences as audio plays</p>', unsafe_allow_html=True)
 
             except Exception as e:
-                pb.empty()
-                status.empty()
-                st.error(f"❌ Error: {str(e)}")
+                pb.empty(); stat.empty(); st.error(f"❌ Error: {e}")
 
-# ── History Tab ───────────────────────────────────────────────────────────────
-with tab_history:
-    st.markdown('<div style="height:0.4rem"></div>', unsafe_allow_html=True)
-    if not st.session_state.history:
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 2 — BILINGUAL VIEW
+# ══════════════════════════════════════════════════════════════════════════════
+with tab_bi:
+    st.markdown('<div style="height:.3rem"></div>', unsafe_allow_html=True)
+    st.markdown('<div class="card"><div class="card-label">🔤 Bilingual View — English + Hindi Side by Side</div>', unsafe_allow_html=True)
+    st.markdown('<p style="font-size:.8rem;color:var(--muted);margin-bottom:.75rem;">See each sentence in English alongside its Hindi translation. Great for learning or proofreading.</p>', unsafe_allow_html=True)
+
+    bi_file = st.file_uploader("Upload PDF for bilingual view", type=["pdf"], key="bi_up", label_visibility="collapsed")
+    bc1,bc2 = st.columns(2)
+    with bc1: bi_pages = st.number_input("Pages to translate", min_value=1, max_value=15, value=2, step=1)
+    with bc2: bi_max   = st.number_input("Max sentences shown", min_value=10, max_value=80, value=40, step=5)
+
+    if bi_file and st.button("🌐 Generate Bilingual View", use_container_width=True):
+        with st.spinner("Extracting & translating..."):
+            try:
+                raw,_ = extract_pdf(bi_file, 1, int(bi_pages))
+                cleaned = clean(raw)
+                en_s, hi_s = translate_pairs(cleaned, max_sents=int(bi_max))
+                st.session_state.bilingual_en = en_s
+                st.session_state.bilingual_hi = hi_s
+            except Exception as e: st.error(f"❌ {e}")
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    if st.session_state.bilingual_en:
+        en_s = st.session_state.bilingual_en
+        hi_s = st.session_state.bilingual_hi
+        st.markdown(f'<div class="info-badge">📝 {len(en_s)} sentences · Blue = English · Purple = Hindi</div>', unsafe_allow_html=True)
+        st.markdown('<div style="margin-top:.5rem"></div>', unsafe_allow_html=True)
+
+        for i,(en,hi) in enumerate(zip(en_s,hi_s)):
+            st.markdown(f"""
+            <div class="bi-pair">
+              <div class="bi-col" style="border-left:3px solid #38bdf8">
+                <div class="bi-tag" style="color:#38bdf8">EN · {i+1}</div>
+                <div class="bi-text">{en}</div>
+              </div>
+              <div class="bi-col" style="border-left:3px solid #c084fc">
+                <div class="bi-tag" style="color:#c084fc">HI · {i+1}</div>
+                <div class="bi-text">{hi}</div>
+              </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+        if st.button("🗑️ Clear Bilingual View", use_container_width=True):
+            st.session_state.bilingual_en = []; st.session_state.bilingual_hi = []; st.rerun()
+    else:
         st.markdown("""
-        <div class="empty-history">
-            🕘<br><br>
-            <strong>No conversions yet</strong><br>
-            Your last 5 converted files will appear here.
+        <div class="empty-state">
+          🔤<br><br>
+          <strong style="font-family:'Syne',sans-serif">No bilingual content yet</strong><br>
+          Upload a PDF above and click Generate to see<br>English + Hindi side by side.
+        </div>""", unsafe_allow_html=True)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 3 — READ ALONG (Reading Mode)
+# ══════════════════════════════════════════════════════════════════════════════
+with tab_read:
+    st.markdown('<div style="height:.3rem"></div>', unsafe_allow_html=True)
+
+    if not st.session_state.reading_active or not st.session_state.last_audio_bytes:
+        st.markdown("""
+        <div class="empty-state">
+          📖<br><br>
+          <strong style="font-family:'Syne',sans-serif">No audio yet</strong><br>
+          Generate audio in the <strong>🎙️ Convert</strong> tab first,<br>
+          then come back here to read along sentence by sentence.
         </div>""", unsafe_allow_html=True)
     else:
-        st.markdown(f'<p style="font-size:0.78rem;color:var(--muted);margin-bottom:0.9rem;">{len(st.session_state.history)} of {MAX_HISTORY} slots used</p>', unsafe_allow_html=True)
-        for i, e in enumerate(st.session_state.history):
-            badge = "hi" if "Hindi" in e["lang"] else "en"
+        st.markdown('<div class="card"><div class="card-label">📖 Read Along — Sentences highlight as audio plays</div>', unsafe_allow_html=True)
+        st.markdown('<p style="font-size:.79rem;color:var(--muted);margin-bottom:.6rem;">Press ▶ Play below → sentences highlight automatically. Click any sentence to jump there.</p>', unsafe_allow_html=True)
+
+        # Audio player
+        st.audio(st.session_state.last_audio_bytes, format="audio/mp3")
+
+        # Waveform
+        st.markdown("""
+        <div class="waveform-wrap" style="margin:.55rem 0">
+          <canvas id="waveform-canvas"></canvas>
+          <div class="wf-controls">
+            <span class="wf-time"><span id="wf-cur">0:00</span> / <span id="wf-dur">--:--</span></span>
+            <span style="font-size:.68rem;color:var(--muted)">Click waveform to seek</span>
+          </div>
+        </div>
+        """, unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
+
+        # Sentences
+        text = st.session_state.reading_text
+        sents = [s.strip() for s in re.split(r'(?<=[।.!?])\s+', text) if len(s.strip()) > 12]
+
+        sents_html = "\n".join(f'<div class="r-sent" data-idx="{i}">{s}</div>' for i,s in enumerate(sents))
+
+        st.markdown(f"""
+        <div style="margin-bottom:.4rem">
+          <div class="info-badge">📝 {len(sents)} sentences · Orange = current · Click = jump + play</div>
+        </div>
+        <div class="reading-container">
+          {sents_html}
+        </div>
+        """, unsafe_allow_html=True)
+
+        st.components.v1.html(WAVEFORM_JS + READING_JS, height=0)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 4 — HISTORY
+# ══════════════════════════════════════════════════════════════════════════════
+with tab_hist:
+    st.markdown('<div style="height:.3rem"></div>', unsafe_allow_html=True)
+    if not st.session_state.history:
+        st.markdown("""
+        <div class="empty-state">
+          🕘<br><br>
+          <strong style="font-family:'Syne',sans-serif">No conversions yet</strong><br>
+          Your last 5 converted files will appear here.
+        </div>""", unsafe_allow_html=True)
+    else:
+        st.markdown(f'<p style="font-size:.76rem;color:var(--muted);margin-bottom:.8rem;">{len(st.session_state.history)} of {MAX_HIST} slots · oldest auto-removed</p>', unsafe_allow_html=True)
+        for i,e in enumerate(st.session_state.history):
+            b = "hi" if "Hindi" in e["lang"] else "en"
             st.markdown(f"""
             <div class="hist-card">
-                <div class="hist-info">
-                    <div class="hist-name">📄 {e['name']}</div>
-                    <div class="hist-meta">{e['time']} · {e['words']:,} words · ~{e['minutes']} min · {e['voice']}</div>
-                </div>
-                <span class="hist-badge {badge}">{e['lang']}</span>
+              <div>
+                <div class="hist-name">📄 {e['name']}</div>
+                <div class="hist-meta">{e['time']} · {e['words']:,} words · ~{e['mins']} min · {e['voice']}</div>
+              </div>
+              <span class="hist-badge {b}">{e['lang']}</span>
             </div>""", unsafe_allow_html=True)
-            ca, cb = st.columns(2)
-            with ca:
-                st.audio(e["audio"], format="audio/mp3")
-            with cb:
-                st.download_button("⬇️ Download", e["audio"], f"{e['name']}_audio.mp3",
-                                   "audio/mpeg", use_container_width=True, key=f"dl_{i}_{e['time']}")
+            ha,hb = st.columns(2)
+            with ha: st.audio(e["audio"], format="audio/mp3")
+            with hb: st.download_button("⬇️ Download", e["audio"], f"{e['name']}_audio.mp3",
+                                        "audio/mpeg", use_container_width=True, key=f"h{i}{e['time']}")
 
-        if st.button("🗑️ Clear History", use_container_width=True):
-            st.session_state.history = []
-            st.rerun()
+        if st.button("🗑️ Clear All History", use_container_width=True):
+            st.session_state.history = []; st.rerun()
 
-# ── Footer ────────────────────────────────────────────────────────────────────
+# Footer
 st.markdown("""
 <div class="footer">
-    Built By Shaurya · Edge TTS · Google Translate · pdfplumber · Streamlit<br>
-    English PDF → Hindi Audio 🇮🇳 &nbsp;|&nbsp; English Audio 🇺🇸🇬🇧
+  Built By Shaurya · Edge TTS · Google Translate · pdfplumber · Streamlit<br>
+  English PDF → Hindi Audio 🇮🇳 &nbsp;|&nbsp; English Audio 🇺🇸🇬🇧
 </div>
 """, unsafe_allow_html=True)
